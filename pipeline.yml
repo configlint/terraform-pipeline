@@ -1,0 +1,176 @@
+Parameters:
+    ProjectId:
+        Type: String
+        Default: config-lint-demo
+    GitHubUser:
+      Type: String
+    Repo:
+      Type: String
+    Branch:
+      Type: String
+      Default: master
+    GitHubToken:
+      Type: String
+      NoEcho: true
+Resources:
+    Pipeline:
+        Type: AWS::CodePipeline::Pipeline
+        Properties:
+            Name: !Ref ProjectId
+            RoleArn: !GetAtt CodePipelineRole.Arn
+            ArtifactStore:
+                Location: !Ref ArtifactStore
+                Type: S3
+            Stages:
+                - Name: Source
+                  Actions:
+                      - Name: SourceAction
+                        ActionTypeId:
+                           Category: Source
+                           Owner: ThirdParty
+                           Provider: GitHub
+                           Version: '1'
+                        Configuration:
+                           Owner: !Ref GitHubUser
+                           Repo: !Ref Repo
+                           Branch: !Ref Branch
+                           OAuthToken: !Ref GitHubToken
+                        OutputArtifacts:
+                           - Name: SourceArtifact
+                        RunOrder: 1
+                - Name: Deploy
+                  Actions:
+                      - Name: BuildAction
+                        ActionTypeId:
+                            Category: Build
+                            Owner: AWS
+                            Provider: CodeBuild
+                            Version: '1'
+                        Configuration:
+                            ProjectName: !Ref ProjectId
+                        InputArtifacts:
+                            - Name: SourceArtifact
+                        OutputArtifacts:
+                            - Name: BuildArtifact
+                        RunOrder: 1
+    ArtifactStore:
+        Type: AWS::S3::Bucket
+    CodeBuildProject:
+        Type: AWS::CodeBuild::Project
+        DependsOn:
+            - CodeBuildRole
+            - ArtifactStore
+        Properties:
+            Artifacts:
+                Packaging: zip
+                Type: codepipeline
+            Description: 'CodeBuild Project'
+            Environment:
+                ComputeType: BUILD_GENERAL1_SMALL
+                Image: aws/codebuild/nodejs:6.3.1
+                Type: container
+            Name: !Ref ProjectId
+            ServiceRole: !Ref CodeBuildRole
+            Source:
+                Type: codepipeline
+                BuildSpec: |
+                    version: 0.2
+                    env:
+                        variables:
+                            TARBALL: https://github.com/stelligent/config-lint/releases/download/v0.0.2/config-lint_0.0.2_Linux_i386.tar.gz
+                            CONFIG_LINT_DIR: /config-lint
+                    phases:
+                      install:
+                        commands:
+                          - mkdir -p $CONFIG_LINT_DIR
+                          - curl -sL $TARBALL | tar xvfz - -C $CONFIG_LINT_DIR
+                      build:
+                        commands:
+                          - $CONFIG_LINT_DIR/config-lint -terraform *.tf
+
+    CodeBuildRole:
+        Type: AWS::IAM::Role
+        Description: 'Role for CodeBuild'
+        DependsOn:
+            - ArtifactStore
+        Properties:
+            RoleName: !Join ['-', [!Ref 'ProjectId', 'build-role']]
+            AssumeRolePolicyDocument:
+                Statement: 
+                  - Effect: Allow
+                    Principal:
+                      Service: 
+                        - codebuild.amazonaws.com
+                    Action:
+                        - sts:AssumeRole
+            Path: /
+            Policies:
+                - PolicyName: codebuild
+                  PolicyDocument:
+                    Version: 2012-10-17
+                    Statement:
+                      - Effect: Allow
+                        Action:
+                          - "s3:*"
+                        Resource:
+                          - !GetAtt ArtifactStore.Arn
+                          - !Join ['/', [!GetAtt ArtifactStore.Arn, '*']]
+                      - Effect: Allow
+                        Action: 
+                          - "codebuild:StartBuild"
+                        Resource:
+                          - !Join [ '', [ 'arn:aws:codebuild:*:*:project/', !Ref ProjectId ]]
+                          - !Join [ '', [ 'arn:aws:codebuild:*:*:build/', !Ref ProjectId, ':*' ]]
+                      - Effect: Allow
+                        Action:
+                          - "logs:CreateLog*"
+                          - "logs:PutLogEvents"
+                        Resource:
+                          - "arn:aws:logs:*:*:log-group:*"
+                      - Effect: Allow
+                        Action:
+                          - "iam:GetRole"
+                        Resource:
+                          - "arn:aws:iam::*:role/*"
+    CodePipelineRole:
+        Type: AWS::IAM::Role
+        DependsOn:
+            - ArtifactStore
+        Properties:
+            RoleName: !Join ['-', [!Ref 'ProjectId', 'pipeline-role']]
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Effect: Allow
+                    Principal:
+                      Service:
+                        - "codepipeline.amazonaws.com"
+                    Action:
+                      - sts:AssumeRole
+            Path: /
+            Policies:
+                - PolicyName: codepipeline
+                  PolicyDocument:
+                    Version: 2012-10-17
+                    Statement:
+                      - Effect: Allow
+                        Action:
+                          - "s3:*"
+                        Resource:
+                          - !GetAtt ArtifactStore.Arn
+                          - !Join ['/', [!GetAtt ArtifactStore.Arn, '*']]
+                      - Effect: Allow
+                        Action:
+                          - "codebuild:*"
+                        Resource:
+                          - !GetAtt CodeBuildProject.Arn
+                      - Effect: Allow
+                        Action:
+                          - "codepipeline:*"
+                        Resource:
+                          - !Join ['', [ 'arn:aws:codepipeline:*:*:', !Ref 'ProjectId', '-pipeline']]
+                      - Effect: Allow
+                        Action:
+                          - "logs:*"
+                        Resource:
+                          - "*"
